@@ -21,17 +21,18 @@ export default async function handler(req, res) {
 
     // ===== Prompts de sistema =====
     const SYS = {
-      fac: `Eres FACILITADOR. Habla amable y breve.
-Objetivo: construir un BRIEF en 1–3 turnos.
-Obtén:
-- objetivo (1 frase)
-- 2–5 restricciones
-- criterio_exito (1 frase)
-- prioridad (una palabra)
-- plazo (fecha o semanas)
-- modo (lite|full)
-Si falta info, pregunta UNA cosa por turno.
-Cuando lo tengas, muestra el JSON SOLO entre <<<BRIEF>>> y <<<END>>> y pregunta: "¿Confirmas para iniciar debate?". Prohibido saludar largo o definir conceptos.`,
+        fac: `Eres FACILITADOR amable y conciso.
+Tareas:
+1) Construye un BRIEF con campos: objetivo (1 frase), restricciones (2–5),
+   criterio_exito (1 frase), prioridad (una palabra), plazo (fecha o semanas), modo (lite|full).
+2) Si ya detectas objetivo + región (LatAm) + plan/mode (free|lite|full), 
+   ARMA el BRIEF de inmediato (no vuelvas a preguntar lo mismo).
+3) Máximo 2 preguntas: si faltan datos tras 2 turnos, rellena con supuestos razonables y marca "supuestos".
+4) Prohibido repetir las palabras del usuario como pregunta; no pidas "objetivo" si ya lo diste por bueno.
+5) Devuelve el BRIEF en JSON **entre** <<<BRIEF>>> y <<<END>>> y luego una frase corta:
+   "¿Confirmas para iniciar debate o editar algo?"
+
+Sé cálido, breve y no des definiciones teóricas.`,
 
       coach: `Eres COACH-ORQUESTADOR. Prohibido saludar, definir conceptos o pedir al usuario "¿en qué ayudo?".
 Responde solo con:
@@ -109,21 +110,53 @@ Si no, devuelve solo una lista de correcciones puntuales; nunca reescribas toda 
 
     // ===== Fase 1: INTAKE (Facilitador) =====
     if (phase === 'intake') {
-      const facPrompt = `Contexto: ${JSON.stringify(context || {})}
+  const turns = Number((context?.__intake_turns ?? 0)) + 1;
+
+  // pistas simples (slot-filling)
+  const text = `${message}`.toLowerCase();
+  const hasObjetivo = /p2p|transfer(encias|ir)|enviar dinero|wallet|billetera/.test(text);
+  const hasRegion   = /latam|latín|latinoamérica/.test(text) || (context?.region === 'LatAm');
+  const hasPlan     = /free|gratis|lite/.test(text) || (context?.plan === 'free' || context?.lite);
+
+  // si ya están los slots clave, pedimos el BRIEF directo (sin más preguntas)
+  const fastTrack = hasObjetivo && hasRegion && hasPlan;
+
+  const facPrompt = `Contexto: ${JSON.stringify({ ...context, __intake_turns: turns, fastTrack })}
 Usuario: ${message}
-Si es posible, devuelve el JSON entre <<<BRIEF>>> y <<<END>>>.`;
-      const facOut = await callGroq(MODELS.fac, SYS.fac, facPrompt, 500);
+Si es posible, devuelve el JSON entre <<<BRIEF>>> y <<<END>>>. 
+Recuerda: máximo 2 preguntas; si faltan datos, completa con supuestos.`;
 
-      const m = facOut.match(/<<<BRIEF>>>([\s\S]*?)<<<END>>>/);
-      const briefJson = m ? safeParseJSON(m[1]) : null;
-      const reply = facOut.replace(/<<<BRIEF>>>([\s\S]*?)<<<END>>>/g, '').trim();
+  const facOut = await callGroq(MODELS.fac, SYS.fac, facPrompt, 450);
 
-      return res.status(200).json({
-        reply,
-        brief: briefJson,
-        next_phase_hint: briefJson ? 'ready' : 'intake'
-      });
-    }
+  // Extrae BRIEF si viene
+  const m = facOut.match(/<<<BRIEF>>>([\s\S]*?)<<<END>>>/);
+  const briefJson = m ? safeParseJSON(m[1]) : null;
+
+  // Si no vino BRIEF y ya superamos 2 turnos, crea uno forzado con supuestos mínimos
+  let reply = facOut.replace(/<<<BRIEF>>>([\s\S]*?)<<<END>>>/g, '').trim();
+  let briefOut = briefJson;
+
+  if (!briefOut && turns >= 2) {
+    briefOut = {
+      objetivo: hasObjetivo ? "P2P real para enviar dinero entre personas" : (context?.objetivo || "Lanzar P2P de remesas entre usuarios"),
+      restricciones: ["plan free", "LatAm", "bajas comisiones", "KYC básico"],
+      criterio_exito: "Usuarios activos enviando dinero con tasa de éxito ≥ 95%",
+      prioridad: "alta",
+      plazo: "6 semanas",
+      modo: (context?.lite || /free|lite/.test(text)) ? "lite" : "full",
+      supuestos: ["se permite KYC básico", "cumplimos AML local", "baseline de tráfico inicial"]
+    };
+    reply = (reply ? reply + "\n\n" : "") + "Propongo este BRIEF inicial. ¿Confirmas para iniciar debate o editar algo?";
+  }
+
+  return res.status(200).json({
+    reply,
+    brief: briefOut || null,
+    next_phase_hint: briefOut ? 'ready' : 'intake',
+    // devolvemos el contador para próximas vueltas
+    context_echo: { ...(context||{}), __intake_turns: turns }
+  });
+}
 
     // ===== Fase 2: DEBATE (Coach + agentes + guardia) =====
     const transcript = [];
@@ -252,4 +285,5 @@ ${cap(dataR2 || dataR1, 1500)}
     return res.status(500).json({ error: error.message || 'Error interno del servidor' });
   }
 }
+
 
