@@ -20,6 +20,7 @@
     .bubble{ max-width: 90%; }
     .mono{ font-feature-settings: "ss01" 1; }
     .shadow-glass{ box-shadow: 0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06); }
+    details > summary { cursor: pointer; }
   </style>
 </head>
 <body class="h-full bg-neutral-950 text-neutral-100">
@@ -36,7 +37,9 @@
       </header>
 
       <div class="rounded-xl border border-[var(--border)] bg-neutral-900/40 p-3">
-        <p class="text-sm opacity-90">Primero conversamos (antesala) para armar un <b>BRIEF</b>. Al confirmar, verás el <b>debate por rondas</b> y la decisión final.</p>
+        <p class="text-sm opacity-90">
+          Primero conversamos (antesala) para armar un <b>Resumen</b>. Al confirmar, verás el <b>debate por rondas</b> y la decisión final.
+        </p>
       </div>
 
       <div id="transcript" class="scroll-smooth overflow-y-auto grow min-h-[40vh] max-h-[68vh] space-y-3 pr-1 text-sm">
@@ -52,14 +55,14 @@
           <div class="shrink-0 w-8 h-8 rounded-full bg-white/10 grid place-content-center">🤖</div>
           <div class="bubble rounded-2xl p-3 border border-[var(--border)] bg-neutral-900/50">
             <div class="text-xs uppercase opacity-60 mb-1">Asistente</div>
-            <div>¡Hola! Cuéntame tu objetivo y en 1–3 turnos te propongo un <b>BRIEF</b>. Cuando confirmes, mi equipo debatirá y te dará un plan claro.</div>
+            <div>¡Hola! Cuéntame tu objetivo y en 1–2 turnos te propongo un <b>Resumen</b> (objetivo, restricciones, éxito, prioridad, plazo). Cuando confirmes, mi equipo debatirá y te dará un plan claro.</div>
           </div>
         </div>
       </div>
 
       <!-- composer -->
       <form id="form" class="mt-4 flex items-stretch gap-3">
-        <input id="input" type="text" placeholder="Ej: Lanzar P2P de envíos de dinero en LatAm con plan free"
+        <input id="input" type="text" placeholder="Ej: Lanzar P2P para enviar dinero, plan free, 4 semanas"
                class="flex-1 rounded-xl border border-[var(--border)] bg-neutral-900/60 px-4 py-3 outline-none focus:ring-2 focus:ring-[var(--ring)]"/>
         <button class="rounded-xl bg-white text-neutral-900 px-5 py-3 font-semibold hover:bg-neutral-200 transition">Enviar</button>
       </form>
@@ -84,11 +87,10 @@
     const LITE = document.getElementById('lite');
 
     const API_URL = '/api/chat'; // Next/Vercel
-    const baseContext = { app: 'web', plan: 'free', region: 'LatAm' };
+    const baseContext = { app: 'web', plan: 'free' }; // sin región por defecto
 
     let DRAFT_BRIEF = null;
     let PHASE = 'intake'; // intake -> debate
-    let lastUserMessage = '';
 
     function el(tag, cls, html){ const n = document.createElement(tag); if(cls) n.className = cls; if(html!==undefined) n.innerHTML = html; return n; }
 
@@ -110,12 +112,26 @@
            : 'text-rose-300';
     }
 
+    // Colapsa Ronda 1 de Tech/Biz/Data por defecto (ver detalles)
     function addTranscript(agent, round, content){
       const card = el('div','rounded-xl border border-[var(--border)] bg-neutral-900/40 p-3');
       const head = el('div','text-xs opacity-70 mb-1 mono');
-      const label = round===0 ? 'BRIEF' : `Ronda ${round}`;
+      const label = round===0 ? 'Resumen' : `Ronda ${round}`;
       head.innerHTML = `${label} · <span class="${agentColor(agent)} font-semibold">${agent.toUpperCase()}</span>`;
-      const body = el('div','whitespace-pre-wrap text-sm', content);
+
+      let body;
+      if (round === 1 && agent !== 'coach') {
+        body = document.createElement('details');
+        const sum = document.createElement('summary');
+        sum.className = 'text-sm opacity-90';
+        sum.textContent = 'Ver detalles';
+        const inner = el('div','whitespace-pre-wrap text-sm mt-2', content);
+        body.appendChild(sum);
+        body.appendChild(inner);
+      } else {
+        body = el('div','whitespace-pre-wrap text-sm', content);
+      }
+
       card.appendChild(head); card.appendChild(body);
       TRANS.appendChild(card);
       TRANS.scrollTop = TRANS.scrollHeight;
@@ -128,9 +144,9 @@
 
     CLEAR.addEventListener('click', () => { TRANS.innerHTML = ''; });
 
-    // Dedup de BRIEF y botón de Confirmar
+    // Elimina Resumen/botón previos para evitar duplicados
     function removeOldBriefAndButtons(){
-      const cards = Array.from(TRANS.querySelectorAll('div')).filter(n => /BRIEF PROPUESTO/.test(n.textContent||''));
+      const cards = Array.from(TRANS.querySelectorAll('div')).filter(n => /RESUMEN PROPUESTO|BRIEF PROPUESTO/i.test(n.textContent||''));
       cards.forEach(c => c.remove());
       const btns = Array.from(TRANS.querySelectorAll('button')).filter(b => b.textContent?.includes('Confirmar y comenzar debate'));
       btns.forEach(b => b.remove());
@@ -141,9 +157,9 @@
       const pretty = `Objetivo: ${brief.objetivo}
 Restricciones: ${brief.restricciones?.join(', ') || '—'}
 Éxito: ${brief.criterio_exito}
-Prioridad: ${brief.prioridad} · Plazo: ${brief.plazo}
-Modo: ${brief.modo}`;
-      addTranscript('coach', 0, `BRIEF PROPUESTO\n${pretty}`);
+Prioridad: ${brief.prioridad || '—'} · Plazo: ${brief.plazo || '—'}
+Modo: ${brief.modo || '—'}`;
+      addTranscript('coach', 0, `RESUMEN PROPUESTO\n${pretty}`);
     }
 
     async function runDebate(){
@@ -185,16 +201,15 @@ Razón: ${s.rationale}`);
       TRANS.scrollTop = TRANS.scrollHeight;
     }
 
-    // Quick confirm SI y SOLO SI el usuario no dice “no/espera”
+    // Quick confirm: si ya hay objetivo+plan (sin exigir región), solo muestra botón (no autolanza)
     function maybeRenderQuickConfirm(msg){
       const t = (msg || '').toLowerCase();
       const saysNo = /\bno\b|espera|aún no|todavía no|no quiero|no he dicho/i.test(t);
       if (saysNo) return;
-      const hasObj = /p2p|transfer(encias|ir)|enviar dinero|wallet|billetera/.test(t);
-      const hasReg = /latam|latín|latinoamérica/.test(t) || baseContext.region === 'LatAm';
-      const hasPlan = /free|gratis|lite/.test(t) || baseContext.plan === 'free' || LITE?.checked;
-      if (hasObj && hasReg && hasPlan && !DRAFT_BRIEF && PHASE === 'intake') {
-        renderConfirmButton(); // solo botón; NUNCA auto-arranca
+      const hasObj = /p2p|transfer(encias|ir)|enviar dinero|wallet|billetera|vender|venta|gps/.test(t);
+      const hasPlan = /free|gratis|lite/.test(t) || baseContext.plan === 'free' || document.getElementById('lite')?.checked;
+      if (hasObj && hasPlan && !DRAFT_BRIEF && PHASE === 'intake') {
+        renderConfirmButton();
       }
     }
 
@@ -206,7 +221,7 @@ Razón: ${s.rationale}`);
       addMsg('user', message);
       INPUT.value = '';
 
-      // sugerencia de confirmación rápida (sin auto-arranque)
+      // Sugerencia de confirmación (solo botón)
       maybeRenderQuickConfirm(message);
 
       const stopThinking = setThinking();
@@ -223,22 +238,19 @@ Razón: ${s.rationale}`);
 
         if(!r.ok) throw new Error(data?.error || r.statusText);
 
-        // Persistir contadores/flags de intake si el backend los devuelve
         if (data.context_echo) Object.assign(baseContext, data.context_echo);
 
         if (PHASE === 'intake') {
           addMsg('assistant', data.reply || '(facilitador)');
 
-          // ¿Hay BRIEF? muéstralo y, si está "ready", ofrece confirmar
           if (data.brief) {
             DRAFT_BRIEF = data.brief;
             renderBriefCard(DRAFT_BRIEF);
 
-            // Si el reply sugiere confirmar y tú no dijiste "no", muestra el botón
-            const saidNo = /\bno\b|espera|aún no|todavía no|no quiero|no he dicho/i.test(message.toLowerCase());
-            if (data.next_phase_hint === 'ready' && !saidNo) renderConfirmButton();
+            // Solo ofrecer confirmar si el backend dice 'ready'
+            if (data.next_phase_hint === 'ready') renderConfirmButton();
           } else {
-            // intenta quick-confirm también con el texto del asistente por si trae más contexto
+            // intenta quick-confirm también con el texto del asistente
             maybeRenderQuickConfirm(data.reply || '');
           }
           return;
