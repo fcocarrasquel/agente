@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="es" class="h-full">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Advisor Chat · Multi-Agente</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    :root{
+      --glass: rgba(255,255,255,.04);
+      --glass-2: rgba(255,255,255,.06);
+      --border: rgba(255,255,255,.12);
+      --ring: rgba(255,255,255,.18);
+    }
+    body{ font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'Liberation Sans', sans-serif; }
+    .scroll-smooth::-webkit-scrollbar{ width: 10px; }
+    .scroll-smooth::-webkit-scrollbar-thumb{ background: #2b2b2b; border-radius: 999px; }
+    .bubble{ max-width: 90%; }
+    .mono{ font-feature-settings: "ss01" 1; }
+    .shadow-glass{ box-shadow: 0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06); }
+  </style>
+</head>
+<body class="h-full bg-neutral-950 text-neutral-100">
+  <div class="mx-auto max-w-[1200px] p-4 md:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+    <!-- SIDE: header + transcript -->
+    <aside class="lg:col-span-1 rounded-2xl border border-[var(--border)] bg-[var(--glass)] backdrop-blur-md shadow-glass p-4 md:p-5 flex flex-col gap-4">
+      <header class="flex items-center justify-between">
+        <div>
+          <h1 class="text-xl font-bold">Advisor Chat</h1>
+          <p class="text-xs opacity-60">Equipo de asesores · Groq</p>
+        </div>
+        <button id="clear" class="text-xs px-3 py-1 rounded-lg border border-[var(--border)] hover:bg-[var(--glass-2)] transition">Limpiar</button>
+      </header>
+
+      <div class="rounded-xl border border-[var(--border)] bg-neutral-900/40 p-3">
+        <p class="text-sm opacity-90">Verás aquí el <b>debate por rondas</b> del Coach, Arquitecto, Ventas y Data antes de la respuesta final.</p>
+      </div>
+
+      <div id="transcript" class="scroll-smooth overflow-y-auto grow min-h-[40vh] max-h-[68vh] space-y-3 pr-1 text-sm">
+        <!-- items renderizados por JS -->
+      </div>
+    </aside>
+
+    <!-- MAIN: chat -->
+    <main class="lg:col-span-2 rounded-2xl border border-[var(--border)] bg-[var(--glass)] backdrop-blur-md shadow-glass p-4 md:p-5 flex flex-col">
+      <!-- messages -->
+      <div id="chat" class="scroll-smooth grow min-h-[50vh] max-h-[72vh] overflow-y-auto space-y-4 pr-1">
+        <div class="flex gap-3 items-start">
+          <div class="shrink-0 w-8 h-8 rounded-full bg-white/10 grid place-content-center">🤖</div>
+          <div class="bubble rounded-2xl p-3 border border-[var(--border)] bg-neutral-900/50">
+            <div class="text-xs uppercase opacity-60 mb-1">Asistente</div>
+            <div>¡Hola! Cuéntame tu objetivo y mi equipo de asesores debatirá para darte una propuesta clara y accionable.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- composer -->
+      <form id="form" class="mt-4 flex items-stretch gap-3">
+        <input id="input" type="text" placeholder="Ej: Lanzar MVP SaaS B2B en 4 semanas, presupuesto bajo"
+               class="flex-1 rounded-xl border border-[var(--border)] bg-neutral-900/60 px-4 py-3 outline-none focus:ring-2 focus:ring-[var(--ring)]"/>
+        <button class="rounded-xl bg-white text-neutral-900 px-5 py-3 font-semibold hover:bg-neutral-200 transition">Enviar</button>
+      </form>
+
+      <!-- footer -->
+      <div class="mt-3 text-[11px] opacity-60 flex items-center justify-between">
+        <span>Vercel + Groq · Multi-Agente</span>
+        <label class="flex items-center gap-2">
+          <input id="lite" type="checkbox" class="accent-white" />
+          <span>Modo lite (ahorra tokens)</span>
+        </label>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const CHAT = document.getElementById('chat');
+    const FORM = document.getElementById('form');
+    const INPUT = document.getElementById('input');
+    const TRANS = document.getElementById('transcript');
+    const CLEAR = document.getElementById('clear');
+    const LITE = document.getElementById('lite');
+
+    const API_URL = '/api/chat'; // Next/Vercel
+    const baseContext = { app: 'web', plan: 'free', region: 'LatAm' };
+
+    function el(tag, cls, html){ const n = document.createElement(tag); if(cls) n.className = cls; if(html!==undefined) n.innerHTML = html; return n; }
+
+    function addMsg(role, text){
+      const row = el('div','flex gap-3 items-start');
+      const avatar = el('div','shrink-0 w-8 h-8 rounded-full grid place-content-center ' + (role==='user' ? 'bg-emerald-400/20' : 'bg-white/10'), role==='user'?'🧑':'🤖');
+      const bubble = el('div','bubble rounded-2xl p-3 border border-[var(--border)] ' + (role==='user'?'bg-neutral-800/60':'bg-neutral-900/50'));
+      bubble.innerHTML = `<div class="text-xs uppercase opacity-60 mb-1">${role==='user'?'Usuario':'Asistente'}</div><div class="whitespace-pre-wrap">${text}</div>`;
+      row.appendChild(avatar); row.appendChild(bubble);
+      CHAT.appendChild(row);
+      CHAT.scrollTop = CHAT.scrollHeight;
+    }
+
+    function agentColor(agent){
+      return agent==='coach' ? 'text-emerald-300'
+           : agent==='tech'  ? 'text-sky-300'
+           : agent==='biz'   ? 'text-amber-300'
+           : agent==='data'  ? 'text-fuchsia-300'
+           : 'text-rose-300';
+    }
+
+    function addTranscript(agent, round, content){
+      const card = el('div','rounded-xl border border-[var(--border)] bg-neutral-900/40 p-3');
+      const head = el('div','text-xs opacity-70 mb-1 mono');
+      head.innerHTML = `Ronda ${round} · <span class="${agentColor(agent)} font-semibold">${agent.toUpperCase()}</span>`;
+      const body = el('div','whitespace-pre-wrap text-sm', content);
+      card.appendChild(head); card.appendChild(body);
+      TRANS.appendChild(card);
+      TRANS.scrollTop = TRANS.scrollHeight;
+    }
+
+    function setThinking(){
+      addMsg('assistant','Pensando con el equipo…');
+      return () => { // remove last assistant placeholder
+        const last = CHAT.lastElementChild;
+        if (last) CHAT.removeChild(last);
+      };
+    }
+
+    CLEAR.addEventListener('click', () => { TRANS.innerHTML = ''; });
+
+    FORM.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const message = (INPUT.value || '').trim();
+      if (!message) return;
+
+      addMsg('user', message);
+      INPUT.value = '';
+
+      const stopThinking = setThinking();
+
+      try{
+        const context = { ...baseContext, lite: !!LITE.checked };
+        const r = await fetch(API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, context })
+        });
+        const data = await r.json();
+        stopThinking();
+
+        if(!r.ok) throw new Error(data?.error || r.statusText);
+
+        addMsg('assistant', data.reply || '(sin respuesta)');
+
+        (data.transcript || []).forEach(x => addTranscript(x.agent, x.round, x.content));
+
+        // opcional: muestra score mini
+        if (data.scores){
+          const s = data.scores;
+          addTranscript('coach', 3, `Scorecard\n- Viabilidad: ${s.viabilidad}\n- ROI: ${s.roi}\n- TTV: ${s.ttv}\n- Riesgo (invertido): ${s.riesgo}\n- Total: ${s.total}\nRazón: ${s.rationale}`);
+        }
+
+      }catch(err){
+        stopThinking();
+        addMsg('assistant','Error: ' + (err.message || 'Fallo desconocido'));
+      }
+    });
+  </script>
+</body>
+</html>
