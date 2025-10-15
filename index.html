@@ -36,7 +36,7 @@
       </header>
 
       <div class="rounded-xl border border-[var(--border)] bg-neutral-900/40 p-3">
-        <p class="text-sm opacity-90">Verás aquí el <b>debate por rondas</b> del Coach, Arquitecto, Ventas y Data antes de la respuesta final.</p>
+        <p class="text-sm opacity-90">Primero conversamos (antesala) para armar un <b>BRIEF</b>. Al confirmar, verás el <b>debate por rondas</b> y la decisión final.</p>
       </div>
 
       <div id="transcript" class="scroll-smooth overflow-y-auto grow min-h-[40vh] max-h-[68vh] space-y-3 pr-1 text-sm">
@@ -52,7 +52,7 @@
           <div class="shrink-0 w-8 h-8 rounded-full bg-white/10 grid place-content-center">🤖</div>
           <div class="bubble rounded-2xl p-3 border border-[var(--border)] bg-neutral-900/50">
             <div class="text-xs uppercase opacity-60 mb-1">Asistente</div>
-            <div>¡Hola! Cuéntame tu objetivo y mi equipo de asesores debatirá para darte una propuesta clara y accionable.</div>
+            <div>¡Hola! Cuéntame tu objetivo y en 1–3 turnos te propongo un <b>BRIEF</b>. Cuando confirmes, mi equipo debatirá y te dará un plan claro.</div>
           </div>
         </div>
       </div>
@@ -86,6 +86,9 @@
     const API_URL = '/api/chat'; // Next/Vercel
     const baseContext = { app: 'web', plan: 'free', region: 'LatAm' };
 
+    let DRAFT_BRIEF = null;
+    let PHASE = 'intake'; // intake -> debate
+
     function el(tag, cls, html){ const n = document.createElement(tag); if(cls) n.className = cls; if(html!==undefined) n.innerHTML = html; return n; }
 
     function addMsg(role, text){
@@ -109,7 +112,8 @@
     function addTranscript(agent, round, content){
       const card = el('div','rounded-xl border border-[var(--border)] bg-neutral-900/40 p-3');
       const head = el('div','text-xs opacity-70 mb-1 mono');
-      head.innerHTML = `Ronda ${round} · <span class="${agentColor(agent)} font-semibold">${agent.toUpperCase()}</span>`;
+      const label = round===0 ? 'BRIEF' : `Ronda ${round}`;
+      head.innerHTML = `${label} · <span class="${agentColor(agent)} font-semibold">${agent.toUpperCase()}</span>`;
       const body = el('div','whitespace-pre-wrap text-sm', content);
       card.appendChild(head); card.appendChild(body);
       TRANS.appendChild(card);
@@ -117,7 +121,7 @@
     }
 
     function setThinking(){
-      addMsg('assistant','Pensando con el equipo…');
+      addMsg('assistant','Pensando…');
       return () => { // remove last assistant placeholder
         const last = CHAT.lastElementChild;
         if (last) CHAT.removeChild(last);
@@ -125,6 +129,50 @@
     }
 
     CLEAR.addEventListener('click', () => { TRANS.innerHTML = ''; });
+
+    function renderBriefCard(brief){
+      const pretty = `Objetivo: ${brief.objetivo}
+Restricciones: ${brief.restricciones?.join(', ') || '—'}
+Éxito: ${brief.criterio_exito}
+Prioridad: ${brief.prioridad} · Plazo: ${brief.plazo}
+Modo: ${brief.modo}`;
+      addTranscript('coach', 0, `BRIEF PROPUESTO\n${pretty}`);
+    }
+
+    async function runDebate(){
+      const r = await fetch(API_URL, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ message: 'iniciar debate', context: baseContext, phase: 'debate', brief: DRAFT_BRIEF })
+      });
+      const data = await r.json();
+      if(!r.ok) return addMsg('assistant','Error: '+(data?.error||r.statusText));
+      addMsg('assistant', data.reply || '(sin respuesta)');
+      (data.transcript || []).forEach(x => addTranscript(x.agent, x.round, x.content));
+      if (data.scores){
+        const s = data.scores;
+        addTranscript('coach', 3, `Scorecard
+- Viabilidad: ${s.viabilidad}
+- ROI: ${s.roi}
+- TTV: ${s.ttv}
+- Riesgo (invertido): ${s.riesgo}
+- Total: ${s.total}
+Razón: ${s.rationale}`);
+      }
+    }
+
+    function renderConfirmButton(){
+      const btn = document.createElement('button');
+      btn.className = 'mt-2 rounded-lg border px-3 py-2 text-sm hover:bg-white/10';
+      btn.textContent = '✅ Confirmar y comenzar debate';
+      btn.onclick = async () => {
+        PHASE = 'debate';
+        addMsg('assistant', 'Entendido. Inicio el debate del equipo…');
+        await runDebate();
+      };
+      TRANS.appendChild(btn);
+      TRANS.scrollTop = TRANS.scrollHeight;
+    }
 
     FORM.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -141,21 +189,36 @@
         const r = await fetch(API_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message, context })
+          body: JSON.stringify({ message, context, phase: PHASE, brief: DRAFT_BRIEF })
         });
         const data = await r.json();
         stopThinking();
 
         if(!r.ok) throw new Error(data?.error || r.statusText);
 
+        // INTAKE: charla del facilitador + posible BRIEF
+        if (PHASE === 'intake') {
+          addMsg('assistant', data.reply || '(facilitador)');
+          if (data.brief) {
+            DRAFT_BRIEF = data.brief;
+            renderBriefCard(DRAFT_BRIEF);
+            if (data.next_phase_hint === 'ready') renderConfirmButton();
+          }
+          return;
+        }
+
+        // DEBATE (por si ya estabas en esa fase)
         addMsg('assistant', data.reply || '(sin respuesta)');
-
         (data.transcript || []).forEach(x => addTranscript(x.agent, x.round, x.content));
-
-        // opcional: muestra score mini
         if (data.scores){
           const s = data.scores;
-          addTranscript('coach', 3, `Scorecard\n- Viabilidad: ${s.viabilidad}\n- ROI: ${s.roi}\n- TTV: ${s.ttv}\n- Riesgo (invertido): ${s.riesgo}\n- Total: ${s.total}\nRazón: ${s.rationale}`);
+          addTranscript('coach', 3, `Scorecard
+- Viabilidad: ${s.viabilidad}
+- ROI: ${s.roi}
+- TTV: ${s.ttv}
+- Riesgo (invertido): ${s.riesgo}
+- Total: ${s.total}
+Razón: ${s.rationale}`);
         }
 
       }catch(err){
@@ -166,3 +229,4 @@
   </script>
 </body>
 </html>
+
