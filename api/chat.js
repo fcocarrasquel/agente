@@ -1,5 +1,6 @@
 // pages/api/chat.js
-// API para Vercel/Next.js (Pages Router): intake (Facilitador) -> debate (Coach + agentes) -> guardia
+// API para Vercel/Next.js (Pages Router)
+// Fases: intake (Facilitador) -> debate (Coach + agentes) -> guardia
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Método no permitido' });
 
@@ -15,26 +16,26 @@ export default async function handler(req, res) {
       tech: 'llama-3.1-8b-instant',
       biz: 'llama-3.3-70b-versatile',
       data: 'openai/gpt-oss-120b',
+      data_fallback: 'openai/gpt-oss-20b',
       guard: 'meta-llama/llama-guard-4-12b',
       fac: 'llama-3.1-8b-instant' // Facilitador (antesala)
     };
 
     // ===== Prompts de sistema =====
     const SYS = {
-        fac: `Eres FACILITADOR amable y conciso.
+      // FACILITADOR con slot-filling + límite de preguntas + anti-eco
+      fac: `Eres FACILITADOR amable y conciso.
 Tareas:
 1) Construye un BRIEF con campos: objetivo (1 frase), restricciones (2–5),
    criterio_exito (1 frase), prioridad (una palabra), plazo (fecha o semanas), modo (lite|full).
-2) Si ya detectas objetivo + región (LatAm) + plan/mode (free|lite|full), 
-   ARMA el BRIEF de inmediato (no vuelvas a preguntar lo mismo).
+2) Si ya detectas objetivo + región (LatAm) + plan/mode (free|lite|full), ARMA el BRIEF de inmediato (no vuelvas a preguntar lo mismo).
 3) Máximo 2 preguntas: si faltan datos tras 2 turnos, rellena con supuestos razonables y marca "supuestos".
-4) Prohibido repetir las palabras del usuario como pregunta; no pidas "objetivo" si ya lo diste por bueno.
-5) Devuelve el BRIEF en JSON **entre** <<<BRIEF>>> y <<<END>>> y luego una frase corta:
+4) Prohibido repetir las palabras del usuario como pregunta; no pidas "objetivo" si ya está cubierto.
+5) Devuelve el BRIEF en JSON entre <<<BRIEF>>> y <<<END>>> y luego una frase corta:
    "¿Confirmas para iniciar debate o editar algo?"
-
 Sé cálido, breve y no des definiciones teóricas.`,
 
-      coach: `Eres COACH-ORQUESTADOR. Prohibido saludar, definir conceptos o pedir al usuario "¿en qué ayudo?".
+      coach: `Eres COACH-ORQUESTADOR. Prohibido saludar, definir conceptos o pedir "¿en qué ayudo?".
 Responde solo con:
 - Decisión (1–2 frases)
 - Plan 7 días (tabla)
@@ -70,8 +71,16 @@ Sé pragmático.`,
 Si no, devuelve solo una lista de correcciones puntuales; nunca reescribas toda la respuesta.`
     };
 
-    // ===== Utilidades =====
-    async function callGroq(model, system, user, max_tokens = 800) {
+    // ===== Utils =====
+    async function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+    function parseRetryAfterSeconds(txt){
+      const m = /try again in ([0-9.]+)s/i.exec(txt||'');
+      return m ? Math.ceil(parseFloat(m[1]) * 1000) : null;
+    }
+    function safeParseJSON(txt) { try { return JSON.parse(txt); } catch { return null; } }
+    function cap(text, n = 2000) { return text && text.length > n ? text.slice(0, n) + '…' : (text || ''); }
+
+    async function callGroqOnce(model, system, user, max_tokens = 800) {
       const r = await fetch(GROQ_API, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
@@ -85,13 +94,40 @@ Si no, devuelve solo una lista de correcciones puntuales; nunca reescribas toda 
           presence_penalty: 0.0
         })
       });
-      if (!r.ok) throw new Error(`Groq ${model} ${r.status} ${r.statusText}: ${await r.text()}`);
+      if (!r.ok) {
+        const txt = await r.text();
+        const err = new Error(`Groq ${model} ${r.status} ${r.statusText}: ${txt}`);
+        err.status = r.status;
+        err.raw = txt;
+        throw err;
+      }
       const j = await r.json();
       return j?.choices?.[0]?.message?.content || '';
     }
 
-    function safeParseJSON(txt) { try { return JSON.parse(txt); } catch { return null; } }
-    function cap(text, n = 2000) { return text && text.length > n ? text.slice(0, n) + '…' : (text || ''); }
+    // Retry + Backoff + Fallback
+    async function callGroq(model, system, user, max_tokens = 800, {fallbackModel=null, retries=3} = {}) {
+      let attempt = 0;
+      let lastErr = null;
+      const modelsToTry = [model, ...(fallbackModel ? [fallbackModel] : [])];
+
+      while (attempt < retries * modelsToTry.length) {
+        const currModel = modelsToTry[Math.min(Math.floor(attempt / retries), modelsToTry.length - 1)];
+        try {
+          return await callGroqOnce(currModel, system, user, max_tokens);
+        } catch (e) {
+          lastErr = e;
+          if (e.status === 429) {
+            const wait = parseRetryAfterSeconds(e.raw) ?? (400 * Math.pow(2, attempt) + Math.floor(Math.random()*200));
+            await sleep(wait);
+          } else {
+            await sleep(250 * (attempt + 1));
+          }
+          attempt++;
+        }
+      }
+      throw lastErr;
+    }
 
     function scoreFromAgents(t, b, d) {
       const hasApi = /GET|POST|endpoint|schema|arquitectura|OpenAPI/i.test(t || '') ? 0.9 : 0.6;
@@ -110,53 +146,50 @@ Si no, devuelve solo una lista de correcciones puntuales; nunca reescribas toda 
 
     // ===== Fase 1: INTAKE (Facilitador) =====
     if (phase === 'intake') {
-  const turns = Number((context?.__intake_turns ?? 0)) + 1;
+      const turns = Number((context?.__intake_turns ?? 0)) + 1;
 
-  // pistas simples (slot-filling)
-  const text = `${message}`.toLowerCase();
-  const hasObjetivo = /p2p|transfer(encias|ir)|enviar dinero|wallet|billetera/.test(text);
-  const hasRegion   = /latam|latín|latinoamérica/.test(text) || (context?.region === 'LatAm');
-  const hasPlan     = /free|gratis|lite/.test(text) || (context?.plan === 'free' || context?.lite);
+      // slot-filling básico (pistas)
+      const text = `${message}`.toLowerCase();
+      const hasObjetivo = /p2p|transfer(encias|ir)|enviar dinero|wallet|billetera/.test(text);
+      const hasRegion   = /latam|latín|latinoamérica/.test(text) || (context?.region === 'LatAm');
+      const hasPlan     = /free|gratis|lite/.test(text) || (context?.plan === 'free' || context?.lite);
 
-  // si ya están los slots clave, pedimos el BRIEF directo (sin más preguntas)
-  const fastTrack = hasObjetivo && hasRegion && hasPlan;
-
-  const facPrompt = `Contexto: ${JSON.stringify({ ...context, __intake_turns: turns, fastTrack })}
+      const fastTrack = hasObjetivo && hasRegion && hasPlan;
+      const facPrompt = `Contexto: ${JSON.stringify({ ...context, __intake_turns: turns, fastTrack })}
 Usuario: ${message}
-Si es posible, devuelve el JSON entre <<<BRIEF>>> y <<<END>>>. 
+Si es posible, devuelve el JSON entre <<<BRIEF>>> y <<<END>>>.
 Recuerda: máximo 2 preguntas; si faltan datos, completa con supuestos.`;
 
-  const facOut = await callGroq(MODELS.fac, SYS.fac, facPrompt, 450);
+      const facOut = await callGroq(MODELS.fac, SYS.fac, facPrompt, 450);
 
-  // Extrae BRIEF si viene
-  const m = facOut.match(/<<<BRIEF>>>([\s\S]*?)<<<END>>>/);
-  const briefJson = m ? safeParseJSON(m[1]) : null;
+      // Extraer BRIEF si viene
+      const m = facOut.match(/<<<BRIEF>>>([\s\S]*?)<<<END>>>/);
+      const briefJson = m ? safeParseJSON(m[1]) : null;
 
-  // Si no vino BRIEF y ya superamos 2 turnos, crea uno forzado con supuestos mínimos
-  let reply = facOut.replace(/<<<BRIEF>>>([\s\S]*?)<<<END>>>/g, '').trim();
-  let briefOut = briefJson;
+      // Si no vino BRIEF y ya superamos 2 turnos, crear uno forzado con supuestos mínimos
+      let reply = facOut.replace(/<<<BRIEF>>>([\s\S]*?)<<<END>>>/g, '').trim();
+      let briefOut = briefJson;
 
-  if (!briefOut && turns >= 2) {
-    briefOut = {
-      objetivo: hasObjetivo ? "P2P real para enviar dinero entre personas" : (context?.objetivo || "Lanzar P2P de remesas entre usuarios"),
-      restricciones: ["plan free", "LatAm", "bajas comisiones", "KYC básico"],
-      criterio_exito: "Usuarios activos enviando dinero con tasa de éxito ≥ 95%",
-      prioridad: "alta",
-      plazo: "6 semanas",
-      modo: (context?.lite || /free|lite/.test(text)) ? "lite" : "full",
-      supuestos: ["se permite KYC básico", "cumplimos AML local", "baseline de tráfico inicial"]
-    };
-    reply = (reply ? reply + "\n\n" : "") + "Propongo este BRIEF inicial. ¿Confirmas para iniciar debate o editar algo?";
-  }
+      if (!briefOut && turns >= 2) {
+        briefOut = {
+          objetivo: hasObjetivo ? "P2P real para enviar dinero entre personas" : (context?.objetivo || "Lanzar P2P de remesas entre usuarios"),
+          restricciones: ["plan free", "LatAm", "bajas comisiones", "KYC básico"],
+          criterio_exito: "Usuarios activos enviando dinero con tasa de éxito ≥ 95%",
+          prioridad: "alta",
+          plazo: "6 semanas",
+          modo: (context?.lite || /free|lite/.test(text)) ? "lite" : "full",
+          supuestos: ["se permite KYC básico", "cumplimos AML local", "baseline de tráfico inicial"]
+        };
+        reply = (reply ? reply + "\n\n" : "") + "Propongo este BRIEF inicial. ¿Confirmas para iniciar debate o editar algo?";
+      }
 
-  return res.status(200).json({
-    reply,
-    brief: briefOut || null,
-    next_phase_hint: briefOut ? 'ready' : 'intake',
-    // devolvemos el contador para próximas vueltas
-    context_echo: { ...(context||{}), __intake_turns: turns }
-  });
-}
+      return res.status(200).json({
+        reply,
+        brief: briefOut || null,
+        next_phase_hint: briefOut ? 'ready' : 'intake',
+        context_echo: { ...(context||{}), __intake_turns: turns }
+      });
+    }
 
     // ===== Fase 2: DEBATE (Coach + agentes + guardia) =====
     const transcript = [];
@@ -195,39 +228,45 @@ Formato obligatorio sin saludos:
     const lite = effectiveBrief.modo === 'lite' || !!context?.lite;
     const agentsToCall = lite ? ['tech'] : ['tech', 'biz', 'data'];
 
-    // 2) Ronda 1 en paralelo
-    const callsR1 = [];
-    if (agentsToCall.includes('tech')) callsR1.push(callGroq(MODELS.tech, SYS.tech, coachPlan, 800));
-    if (agentsToCall.includes('biz'))  callsR1.push(callGroq(MODELS.biz,  SYS.biz,  coachPlan, 800));
-    if (agentsToCall.includes('data')) callsR1.push(callGroq(MODELS.data, SYS.data, coachPlan, 800));
-    const r1 = await Promise.all(callsR1);
+    // Helper: ejecutar en secuencia para evitar picos TPM
+    async function seq(tasks){
+      const out = [];
+      for (const t of tasks) out.push(await t());
+      return out;
+    }
 
-    let idx = 0, techR1 = '', bizR1 = '', dataR1 = '';
-    if (agentsToCall.includes('tech')) techR1 = r1[idx++] || '';
-    if (agentsToCall.includes('biz'))  bizR1  = r1[idx++] || '';
-    if (agentsToCall.includes('data')) dataR1 = r1[idx++] || '';
+    // 2) Ronda 1 (secuencial para plan free)
+    const r1 = await seq([
+      () => agentsToCall.includes('tech') ? callGroq(MODELS.tech, SYS.tech, coachPlan, 600) : Promise.resolve(''),
+      () => agentsToCall.includes('biz')  ? callGroq(MODELS.biz,  SYS.biz,  coachPlan, 600) : Promise.resolve(''),
+      () => agentsToCall.includes('data') ? callGroq(MODELS.data, SYS.data, coachPlan, 600, { fallbackModel: MODELS.data_fallback }) : Promise.resolve(''),
+    ]);
 
-    if (techR1) transcript.push({ agent: 'tech', round: 1, content: cap(techR1) });
-    if (bizR1)  transcript.push({ agent: 'biz',  round: 1, content: cap(bizR1) });
-    if (dataR1) transcript.push({ agent: 'data', round: 1, content: cap(dataR1) });
+    let [techR1, bizR1, dataR1] = r1;
+    if (agentsToCall.includes('tech')) transcript.push({ agent: 'tech', round: 1, content: cap(techR1) });
+    if (agentsToCall.includes('biz'))  transcript.push({ agent: 'biz',  round: 1, content: cap(bizR1) });
+    if (agentsToCall.includes('data')) transcript.push({ agent: 'data', round: 1, content: cap(dataR1) });
 
-    // 3) Ronda 2 (réplica breve) si no es lite
+    // 3) Ronda 2 (réplica breve) si no es lite (también secuencial)
     let techR2 = '', bizR2 = '', dataR2 = '';
     if (!lite) {
       const summaryForRound2 =
-        `RESUMEN R1 (máx 120 palabras por ajuste)
-- ARQ:\n${cap(techR1, 600)}
-- BIZ:\n${cap(bizR1, 600)}
-- DATA:\n${cap(dataR1, 600)}
+`RESUMEN R1 (máx 120 palabras por ajuste)
+- ARQ:
+${cap(techR1, 600)}
+- BIZ:
+${cap(bizR1, 600)}
+- DATA:
+${cap(dataR1, 600)}
 Indica SOLO ajustes críticos y trade-offs.`;
 
-      const r2 = await Promise.all([
-        agentsToCall.includes('tech') ? callGroq(MODELS.tech, SYS.tech, summaryForRound2, 450) : Promise.resolve(''),
-        agentsToCall.includes('biz')  ? callGroq(MODELS.biz,  SYS.biz,  summaryForRound2, 450) : Promise.resolve(''),
-        agentsToCall.includes('data') ? callGroq(MODELS.data, SYS.data, summaryForRound2, 450) : Promise.resolve(''),
+      const r2 = await seq([
+        () => agentsToCall.includes('tech') ? callGroq(MODELS.tech, SYS.tech, summaryForRound2, 450) : Promise.resolve(''),
+        () => agentsToCall.includes('biz')  ? callGroq(MODELS.biz,  SYS.biz,  summaryForRound2, 450) : Promise.resolve(''),
+        () => agentsToCall.includes('data') ? callGroq(MODELS.data, SYS.data, summaryForRound2, 450, { fallbackModel: MODELS.data_fallback }) : Promise.resolve(''),
       ]);
-
       [techR2, bizR2, dataR2] = r2;
+
       if (techR2) transcript.push({ agent: 'tech', round: 2, content: cap(techR2) });
       if (bizR2)  transcript.push({ agent: 'biz',  round: 2, content: cap(bizR2) });
       if (dataR2) transcript.push({ agent: 'data', round: 2, content: cap(dataR2) });
@@ -256,20 +295,20 @@ DATA-DEF:
 ${cap(dataR2 || dataR1, 1500)}
 `;
 
-    const fused = await callGroq(MODELS.coach, SYS.coach, fusedPrompt, 900);
+    const fused = await callGroq(MODELS.coach, SYS.coach, fusedPrompt, 700);
     transcript.push({ agent: 'coach', round: 3, content: cap(fused) });
 
-    // 5) Guardia — intentamos limpiar sin mostrar “Ajustado por GUARD”
-    const guard1 = await callGroq(MODELS.guard, SYS.guard, fused, 400);
+    // 5) Guardia — limpia sin mostrar “Ajustado por GUARD”
+    const guard1 = await callGroq(MODELS.guard, SYS.guard, fused, 220);
     let reply = fused;
     if (!/OK-GUARD/i.test(guard1)) {
       const patched = await callGroq(
         MODELS.coach,
         SYS.coach,
         `Aplica estas correcciones sin cambiar el contenido esencial:\n${guard1}\n\nTexto:\n${fused}`,
-        600
+        500
       );
-      const guard2 = await callGroq(MODELS.guard, SYS.guard, patched, 300);
+      const guard2 = await callGroq(MODELS.guard, SYS.guard, patched, 200);
       reply = /OK-GUARD/i.test(guard2) ? patched : fused;
     }
 
@@ -285,5 +324,6 @@ ${cap(dataR2 || dataR1, 1500)}
     return res.status(500).json({ error: error.message || 'Error interno del servidor' });
   }
 }
+
 
 
