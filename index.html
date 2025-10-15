@@ -59,7 +59,7 @@
 
       <!-- composer -->
       <form id="form" class="mt-4 flex items-stretch gap-3">
-        <input id="input" type="text" placeholder="Ej: Lanzar MVP SaaS B2B en 4 semanas, presupuesto bajo"
+        <input id="input" type="text" placeholder="Ej: Lanzar P2P de envíos de dinero en LatAm con plan free"
                class="flex-1 rounded-xl border border-[var(--border)] bg-neutral-900/60 px-4 py-3 outline-none focus:ring-2 focus:ring-[var(--ring)]"/>
         <button class="rounded-xl bg-white text-neutral-900 px-5 py-3 font-semibold hover:bg-neutral-200 transition">Enviar</button>
       </form>
@@ -75,163 +75,85 @@
     </main>
   </div>
 
- <script>
-  const CHAT = document.getElementById('chat');
-  const FORM = document.getElementById('form');
-  const INPUT = document.getElementById('input');
-  const TRANS = document.getElementById('transcript');
-  const CLEAR = document.getElementById('clear');
-  const LITE = document.getElementById('lite');
+  <script>
+    const CHAT = document.getElementById('chat');
+    const FORM = document.getElementById('form');
+    const INPUT = document.getElementById('input');
+    const TRANS = document.getElementById('transcript');
+    const CLEAR = document.getElementById('clear');
+    const LITE = document.getElementById('lite');
 
-  const API_URL = '/api/chat'; // Next/Vercel
-  const baseContext = { app: 'web', plan: 'free', region: 'LatAm' };
+    const API_URL = '/api/chat'; // Next/Vercel
+    const baseContext = { app: 'web', plan: 'free', region: 'LatAm' };
 
-  let DRAFT_BRIEF = null;
-  let PHASE = 'intake'; // intake -> debate
+    let DRAFT_BRIEF = null;
+    let PHASE = 'intake'; // intake -> debate
+    let lastUserMessage = '';
 
-  function el(tag, cls, html){ const n = document.createElement(tag); if(cls) n.className = cls; if(html!==undefined) n.innerHTML = html; return n; }
+    function el(tag, cls, html){ const n = document.createElement(tag); if(cls) n.className = cls; if(html!==undefined) n.innerHTML = html; return n; }
 
-  function addMsg(role, text){
-    const row = el('div','flex gap-3 items-start');
-    const avatar = el('div','shrink-0 w-8 h-8 rounded-full grid place-content-center ' + (role==='user' ? 'bg-emerald-400/20' : 'bg-white/10'), role==='user'?'🧑':'🤖');
-    const bubble = el('div','bubble rounded-2xl p-3 border border-[var(--border)] ' + (role==='user'?'bg-neutral-800/60':'bg-neutral-900/50'));
-    bubble.innerHTML = `<div class="text-xs uppercase opacity-60 mb-1">${role==='user'?'Usuario':'Asistente'}</div><div class="whitespace-pre-wrap">${text}</div>`;
-    row.appendChild(avatar); row.appendChild(bubble);
-    CHAT.appendChild(row);
-    CHAT.scrollTop = CHAT.scrollHeight;
-  }
+    function addMsg(role, text){
+      const row = el('div','flex gap-3 items-start');
+      const avatar = el('div','shrink-0 w-8 h-8 rounded-full grid place-content-center ' + (role==='user' ? 'bg-emerald-400/20' : 'bg-white/10'), role==='user'?'🧑':'🤖');
+      const bubble = el('div','bubble rounded-2xl p-3 border border-[var(--border)] ' + (role==='user'?'bg-neutral-800/60':'bg-neutral-900/50'));
+      bubble.innerHTML = `<div class="text-xs uppercase opacity-60 mb-1">${role==='user'?'Usuario':'Asistente'}</div><div class="whitespace-pre-wrap">${text}</div>`;
+      row.appendChild(avatar); row.appendChild(bubble);
+      CHAT.appendChild(row);
+      CHAT.scrollTop = CHAT.scrollHeight;
+    }
 
-  function agentColor(agent){
-    return agent==='coach' ? 'text-emerald-300'
-         : agent==='tech'  ? 'text-sky-300'
-         : agent==='biz'   ? 'text-amber-300'
-         : agent==='data'  ? 'text-fuchsia-300'
-         : 'text-rose-300';
-  }
+    function agentColor(agent){
+      return agent==='coach' ? 'text-emerald-300'
+           : agent==='tech'  ? 'text-sky-300'
+           : agent==='biz'   ? 'text-amber-300'
+           : agent==='data'  ? 'text-fuchsia-300'
+           : 'text-rose-300';
+    }
 
-  function addTranscript(agent, round, content){
-    const card = el('div','rounded-xl border border-[var(--border)] bg-neutral-900/40 p-3');
-    const head = el('div','text-xs opacity-70 mb-1 mono');
-    const label = round===0 ? 'BRIEF' : `Ronda ${round}`;
-    head.innerHTML = `${label} · <span class="${agentColor(agent)} font-semibold">${agent.toUpperCase()}</span>`;
-    const body = el('div','whitespace-pre-wrap text-sm', content);
-    card.appendChild(head); card.appendChild(body);
-    TRANS.appendChild(card);
-    TRANS.scrollTop = TRANS.scrollHeight;
-  }
+    function addTranscript(agent, round, content){
+      const card = el('div','rounded-xl border border-[var(--border)] bg-neutral-900/40 p-3');
+      const head = el('div','text-xs opacity-70 mb-1 mono');
+      const label = round===0 ? 'BRIEF' : `Ronda ${round}`;
+      head.innerHTML = `${label} · <span class="${agentColor(agent)} font-semibold">${agent.toUpperCase()}</span>`;
+      const body = el('div','whitespace-pre-wrap text-sm', content);
+      card.appendChild(head); card.appendChild(body);
+      TRANS.appendChild(card);
+      TRANS.scrollTop = TRANS.scrollHeight;
+    }
 
-  function setThinking(){
-    addMsg('assistant','Pensando…');
-    return () => { // remove last assistant placeholder
-      const last = CHAT.lastElementChild;
-      if (last) CHAT.removeChild(last);
-    };
-  }
+    function setThinking(){
+      addMsg('assistant','Pensando…');
+      return () => { const last = CHAT.lastElementChild; if (last) CHAT.removeChild(last); };
+    }
 
-  CLEAR.addEventListener('click', () => { TRANS.innerHTML = ''; });
+    CLEAR.addEventListener('click', () => { TRANS.innerHTML = ''; });
 
-  function renderBriefCard(brief){
-    const pretty = `Objetivo: ${brief.objetivo}
+    // Dedup de BRIEF y botón de Confirmar
+    function removeOldBriefAndButtons(){
+      const cards = Array.from(TRANS.querySelectorAll('div')).filter(n => /BRIEF PROPUESTO/.test(n.textContent||''));
+      cards.forEach(c => c.remove());
+      const btns = Array.from(TRANS.querySelectorAll('button')).filter(b => b.textContent?.includes('Confirmar y comenzar debate'));
+      btns.forEach(b => b.remove());
+    }
+
+    function renderBriefCard(brief){
+      removeOldBriefAndButtons();
+      const pretty = `Objetivo: ${brief.objetivo}
 Restricciones: ${brief.restricciones?.join(', ') || '—'}
 Éxito: ${brief.criterio_exito}
 Prioridad: ${brief.prioridad} · Plazo: ${brief.plazo}
 Modo: ${brief.modo}`;
-    addTranscript('coach', 0, `BRIEF PROPUESTO\n${pretty}`);
-  }
-
-  async function runDebate(){
-    const r = await fetch(API_URL, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ message: 'iniciar debate', context: baseContext, phase: 'debate', brief: DRAFT_BRIEF })
-    });
-    const data = await r.json();
-    if(!r.ok) return addMsg('assistant','Error: '+(data?.error||r.statusText));
-    addMsg('assistant', data.reply || '(sin respuesta)');
-    (data.transcript || []).forEach(x => addTranscript(x.agent, x.round, x.content));
-    if (data.scores){
-      const s = data.scores;
-      addTranscript('coach', 3, `Scorecard
-- Viabilidad: ${s.viabilidad}
-- ROI: ${s.roi}
-- TTV: ${s.ttv}
-- Riesgo (invertido): ${s.riesgo}
-- Total: ${s.total}
-Razón: ${s.rationale}`);
+      addTranscript('coach', 0, `BRIEF PROPUESTO\n${pretty}`);
     }
-  }
 
-  function renderConfirmButton(){
-    // Evita duplicados si ya existe un botón de confirmación
-    const already = Array.from(TRANS.querySelectorAll('button')).some(b => b.textContent?.includes('Confirmar y comenzar debate'));
-    if (already) return;
-
-    const btn = document.createElement('button');
-    btn.className = 'mt-2 rounded-lg border px-3 py-2 text-sm hover:bg-white/10';
-    btn.textContent = '✅ Confirmar y comenzar debate';
-    btn.onclick = async () => {
-      PHASE = 'debate';
-      addMsg('assistant', 'Entendido. Inicio el debate del equipo…');
-      await runDebate();
-    };
-    TRANS.appendChild(btn);
-    TRANS.scrollTop = TRANS.scrollHeight;
-  }
-
-  // --- NUEVO: Quick confirm si ya hay “señales” (P2P + LatAm + free/lite) ---
-  function maybeRenderQuickConfirm(msg){
-    const t = (msg || '').toLowerCase();
-    const hasObj = /p2p|transfer(encias|ir)|enviar dinero|wallet|billetera/.test(t);
-    const hasReg = /latam|latín|latinoamérica/.test(t) || baseContext.region === 'LatAm';
-    const hasPlan = /free|gratis|lite/.test(t) || baseContext.plan === 'free' || LITE?.checked;
-    if (hasObj && hasReg && hasPlan && !DRAFT_BRIEF && PHASE === 'intake') {
-      renderConfirmButton(); // permite confirmar sin esperar más preguntas
-    }
-  }
-
-  FORM.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const message = (INPUT.value || '').trim();
-    if (!message) return;
-
-    addMsg('user', message);
-    INPUT.value = '';
-
-    // Sugerir confirmación rápida si ya detectamos slots clave
-    maybeRenderQuickConfirm(message);
-
-    const stopThinking = setThinking();
-
-    try{
-      const context = { ...baseContext, lite: !!LITE.checked };
+    async function runDebate(){
       const r = await fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, context, phase: PHASE, brief: DRAFT_BRIEF })
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ message: 'iniciar debate', context: baseContext, phase: 'debate', brief: DRAFT_BRIEF })
       });
       const data = await r.json();
-      stopThinking();
-
-      if(!r.ok) throw new Error(data?.error || r.statusText);
-
-      // Mantén el conteo de turnos u otros flags de intake que devuelva el backend
-      if (data.context_echo) Object.assign(baseContext, data.context_echo);
-
-      // INTAKE: charla del facilitador + posible BRIEF
-      if (PHASE === 'intake') {
-        addMsg('assistant', data.reply || '(facilitador)');
-        if (data.brief) {
-          DRAFT_BRIEF = data.brief;
-          renderBriefCard(DRAFT_BRIEF);
-          if (data.next_phase_hint === 'ready') renderConfirmButton();
-        } else {
-          // Si no hay BRIEF aún, vuelve a intentar confirmación rápida (por si el reply trae más contexto)
-          maybeRenderQuickConfirm(data.reply || '');
-        }
-        return;
-      }
-
-      // DEBATE (por si ya estabas en esa fase)
+      if(!r.ok) return addMsg('assistant','Error: '+(data?.error||r.statusText));
       addMsg('assistant', data.reply || '(sin respuesta)');
       (data.transcript || []).forEach(x => addTranscript(x.agent, x.round, x.content));
       if (data.scores){
@@ -244,15 +166,103 @@ Razón: ${s.rationale}`);
 - Total: ${s.total}
 Razón: ${s.rationale}`);
       }
-
-    }catch(err){
-      stopThinking();
-      addMsg('assistant','Error: ' + (err.message || 'Fallo desconocido'));
     }
-  });
-</script>
 
+    function renderConfirmButton(){
+      const already = Array.from(TRANS.querySelectorAll('button')).some(b => b.textContent?.includes('Confirmar y comenzar debate'));
+      if (already) return;
+
+      const btn = document.createElement('button');
+      btn.className = 'mt-2 rounded-lg border px-3 py-2 text-sm hover:bg-white/10';
+      btn.textContent = '✅ Confirmar y comenzar debate';
+      btn.onclick = async (e) => {
+        e.target.disabled = true;
+        PHASE = 'debate';
+        addMsg('assistant', 'Entendido. Inicio el debate del equipo…');
+        await runDebate();
+      };
+      TRANS.appendChild(btn);
+      TRANS.scrollTop = TRANS.scrollHeight;
+    }
+
+    // Quick confirm SI y SOLO SI el usuario no dice “no/espera”
+    function maybeRenderQuickConfirm(msg){
+      const t = (msg || '').toLowerCase();
+      const saysNo = /\bno\b|espera|aún no|todavía no|no quiero|no he dicho/i.test(t);
+      if (saysNo) return;
+      const hasObj = /p2p|transfer(encias|ir)|enviar dinero|wallet|billetera/.test(t);
+      const hasReg = /latam|latín|latinoamérica/.test(t) || baseContext.region === 'LatAm';
+      const hasPlan = /free|gratis|lite/.test(t) || baseContext.plan === 'free' || LITE?.checked;
+      if (hasObj && hasReg && hasPlan && !DRAFT_BRIEF && PHASE === 'intake') {
+        renderConfirmButton(); // solo botón; NUNCA auto-arranca
+      }
+    }
+
+    FORM.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const message = (INPUT.value || '').trim();
+      if (!message) return;
+
+      addMsg('user', message);
+      INPUT.value = '';
+
+      // sugerencia de confirmación rápida (sin auto-arranque)
+      maybeRenderQuickConfirm(message);
+
+      const stopThinking = setThinking();
+
+      try{
+        const context = { ...baseContext, lite: !!LITE.checked };
+        const r = await fetch(API_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, context, phase: PHASE, brief: DRAFT_BRIEF })
+        });
+        const data = await r.json();
+        stopThinking();
+
+        if(!r.ok) throw new Error(data?.error || r.statusText);
+
+        // Persistir contadores/flags de intake si el backend los devuelve
+        if (data.context_echo) Object.assign(baseContext, data.context_echo);
+
+        if (PHASE === 'intake') {
+          addMsg('assistant', data.reply || '(facilitador)');
+
+          // ¿Hay BRIEF? muéstralo y, si está "ready", ofrece confirmar
+          if (data.brief) {
+            DRAFT_BRIEF = data.brief;
+            renderBriefCard(DRAFT_BRIEF);
+
+            // Si el reply sugiere confirmar y tú no dijiste "no", muestra el botón
+            const saidNo = /\bno\b|espera|aún no|todavía no|no quiero|no he dicho/i.test(message.toLowerCase());
+            if (data.next_phase_hint === 'ready' && !saidNo) renderConfirmButton();
+          } else {
+            // intenta quick-confirm también con el texto del asistente por si trae más contexto
+            maybeRenderQuickConfirm(data.reply || '');
+          }
+          return;
+        }
+
+        // DEBATE (si ya estás en esa fase)
+        addMsg('assistant', data.reply || '(sin respuesta)');
+        (data.transcript || []).forEach(x => addTranscript(x.agent, x.round, x.content));
+        if (data.scores){
+          const s = data.scores;
+          addTranscript('coach', 3, `Scorecard
+- Viabilidad: ${s.viabilidad}
+- ROI: ${s.roi}
+- TTV: ${s.ttv}
+- Riesgo (invertido): ${s.riesgo}
+- Total: ${s.total}
+Razón: ${s.rationale}`);
+        }
+
+      }catch(err){
+        stopThinking();
+        addMsg('assistant','Error: ' + (err.message || 'Fallo desconocido'));
+      }
+    });
+  </script>
 </body>
 </html>
-
-
